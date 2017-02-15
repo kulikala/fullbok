@@ -88,6 +88,11 @@
         "m1.medium":     { "type": "64"    , "HEAP": "-Xms2G -Xmx2G"     ,"NEW": "-XX:NewSize=512m -XX:MaxNewSize=1G"   },
         "m1.large":      { "type": "64"    , "HEAP": "-Xms4G -Xmx4G"     ,"NEW": "-XX:NewSize=1G   -XX:MaxNewSize=2G"   },
         "m1.xlarge":     { "type": "64"    , "HEAP": "-Xms4G -Xmx4G"     ,"NEW": "-XX:NewSize=1G   -XX:MaxNewSize=2G"   },
+        "c4.large":      { "type": "64HVM" , "HEAP": "-Xms2G -Xmx2G"     ,"NEW": "-XX:NewSize=512m -XX:MaxNewSize=1G"   },
+        "c4.xlarge":     { "type": "64HVM" , "HEAP": "-Xms4G -Xmx4G"     ,"NEW": "-XX:NewSize=1G   -XX:MaxNewSize=2G"   },
+        "c4.2xlarge":    { "type": "64HVM" , "HEAP": "-Xms4G -Xmx4G"     ,"NEW": "-XX:NewSize=1G   -XX:MaxNewSize=2G"   },
+        "c4.4xlarge":    { "type": "64HVM" , "HEAP": "-Xms4G -Xmx4G"     ,"NEW": "-XX:NewSize=1G   -XX:MaxNewSize=2G"   },
+        "c4.8xlarge":    { "type": "64HVM" , "HEAP": "-Xms4G -Xmx4G"     ,"NEW": "-XX:NewSize=1G   -XX:MaxNewSize=2G"   },
         "c3.large":      { "type": "64HVM" , "HEAP": "-Xms2G -Xmx2G"     ,"NEW": "-XX:NewSize=512m -XX:MaxNewSize=1G"   },
         "c3.xlarge":     { "type": "64HVM" , "HEAP": "-Xms4G -Xmx4G"     ,"NEW": "-XX:NewSize=1G   -XX:MaxNewSize=2G"   },
         "c3.2xlarge":    { "type": "64HVM" , "HEAP": "-Xms4G -Xmx4G"     ,"NEW": "-XX:NewSize=1G   -XX:MaxNewSize=2G"   },
@@ -263,7 +268,7 @@
         "MaxSize" : { "Ref" : "SlaveCapacity" },
         "DesiredCapacity" : { "Ref" : "SlaveCapacity" },
         "Tags" : [
-          { "Key" : "Name", "Value" : "JMeterSlave", "PropagateAtLaunch" : "true" },
+          { "Key" : "Name", "Value" : { "Fn::Join" : [ "-", [ { "Ref" : "AWS::StackName" },  "JMeterSlave" ]]}, "PropagateAtLaunch" : "true" },
           { "Key" : "Network", "Value" : "Public", "PropagateAtLaunch" : "true" }
         ]
       }
@@ -287,7 +292,8 @@
           "yum update -y\n",
 
           "# Install local dns resolver\n",
-          "yum install -y --enablerepo=epel unbound\n",
+          "printf '[centos-extras]\nname=CentOS-6 - Extras\nmirrorlist=http://mirrorlist.centos.org/?release=6&arch=x86_64&repo=extras\nenabled=0\ngpgcheck=0\n' > /etc/yum.repos.d/CentOS-Extras.repo\n",
+          "yum install -y --enablerepo=centos-extras unbound\n",
           "sed -i 's/val-permissive-mode: .*/val-permissive-mode: yes/g' /etc/unbound/unbound.conf\n",
           "echo -e 'forward-zone:\n\tname: ", { "Ref": "AWS::Region" } ,".compute.internal\n\tforward-addr: 10.0.0.2' >> /etc/unbound/unbound.conf\n",
           "service unbound start\n",
@@ -308,6 +314,7 @@
 
           "sysctl -p\n",
 
+          "echo -e 'ulimit -n 65536\nulimit -u 8192\n' >>/etc/rc.local\n",
           "echo \"/opt/apache-jmeter-2.10/bin/jmeter-server | logger -p daemon.info &\" >>/etc/rc.local\n",
 
           "# All is well so signal success\n",
@@ -324,40 +331,6 @@
             },
             "sources" : {
               "/opt" : { "Fn::FindInMap" : [ "StackConfig", "JMeter", "URL" ]}
-            },
-            "files" : {
-              "/etc/security/limits.conf" : {
-                "content" : { "Fn::Join" : ["", [
-                  "# /etc/security/limits.conf\n",
-                  "#\n",
-                  "#Each line describes a limit for a user in the form:\n",
-                  "#\n",
-                  "#\n",
-                  "#<domain>      <type>  <item>         <value>\n",
-                  "#\n",
-                  "\n",
-                  "#*               soft    core            0\n",
-                  "#*               hard    rss             10000\n",
-                  "#@student        hard    nproc           20\n",
-                  "#@faculty        soft    nproc           20\n",
-                  "#@faculty        hard    nproc           50\n",
-                  "#ftp             hard    nproc           0\n",
-                  "#@student        -       maxlogins       4\n",
-                  "\n",
-                  "\n",
-                  "*                hard   nofile           65536\n",
-                  "*                soft   nofile           65536\n",
-                  "*                hard   nproc            8192\n",
-                  "*                soft   nproc            8192\n",
-                  "\n",
-                  "\n",
-                  "\n",
-                  "# End of file\n"
-                ]]},
-                "mode"  : "000644",
-                "owner" : "root",
-                "group" : "root"
-              }
             },
             "commands" : {
               "00-use_java7" : {
@@ -393,9 +366,6 @@
               },
               "04-tcp_param_tcp_fin_timeout" : {
                 "command" : "echo \"net.ipv4.tcp_fin_timeout = 1\" >> /etc/sysctl.conf"
-              },
-              "05-nproc_limit" : {
-                "command" : "sed -i -e \"s/ nproc     1024/ nproc     8192/\" /etc/security/limits.d/90-nproc.conf"
               }
             }
           }
@@ -434,7 +404,7 @@
         "IamInstanceProfile": { "Ref" : "PowerUserProfile" },
         "Monitoring" : "false",
         "Tags" : [
-          { "Key" : "Name", "Value" : "JMeterMaster" },
+          { "Key" : "Name", "Value" : { "Fn::Join" : [ "-", [ { "Ref" : "AWS::StackName" },  "JMeterMaster" ]]}},
           { "Key" : "Network", "Value" : "Public" }
         ],
         "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [

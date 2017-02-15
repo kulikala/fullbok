@@ -4,7 +4,7 @@ buildscript {
 		maven { url 'http://public-maven.classmethod.info/release' }
 	}
 	dependencies {
-		classpath 'jp.classmethod.aws:gradle-aws-plugin:0.5'
+		classpath 'jp.classmethod.aws:gradle-aws-plugin:0.14.2'
 	}
 }
 
@@ -13,13 +13,12 @@ ext {
 	templateBucket = 'cm-public-cfn-templates'
 }
 
-version = '1.7'
+version = "1.8"
 
 apply plugin: 'aws'
 aws {
-	assert project.hasProperty('awsAccessKey') && project.hasProperty('awsSecretKey'): "AWS credential is required"
-	accessKeyId awsAccessKey
-	secretKey awsSecretKey
+    profileName = project.profileName
+    region = project.region
 	region 'ap-northeast-1'
 }
 

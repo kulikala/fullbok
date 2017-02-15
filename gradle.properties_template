@@ -1,5 +1,5 @@
-awsAccessKey=<for demo or deploy>
-awsSecretKey=<for demo or deploy>
+profileName=<for demo or deploy>
+region=<for demo or deploy>
 keyName=<for demo>
 targetCapacity=2
 slaveCapacity=2
