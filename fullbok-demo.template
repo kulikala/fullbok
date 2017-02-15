@@ -317,7 +317,7 @@
       "Type" : "AWS::CloudFormation::Stack",
       "DependsOn" : "AttachGateway",
       "Properties" : {
-        "TemplateURL" : "https://cm-public-cfn-templates.s3.amazonaws.com/fullbok/fullbok-1.8-SNAPSHOT.template",
+        "TemplateURL" : "https://cm-public-cfn-templates.s3.amazonaws.com/fullbok/fullbok-1.8.template",
          "Parameters" : {
            "KeyName": { "Ref": "KeyName" },
            "AvailabilityZone": { "Fn::FindInMap": [ "AZ", { "Ref": "AWS::Region" }, "primary" ]},
