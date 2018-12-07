@@ -1,0 +1,970 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: >
+  fullbok - JMeter cluster CloudFormation template file.
+
+##############################################################################
+##  CloudFormation Parameters
+##############################################################################
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: >
+      The Name of an existing EC2 KeyPair to enable SSH access to the instances.
+    ConstraintDescription: >
+      must be the name of an existing EC2 KeyPair.
+
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: >
+      Availability zone of JMeter subnet.
+
+  SSHFrom:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >-
+      Comma delimited list of lockdown SSH/RDP access to the hosts.
+      (default can be accessed from anywhere)
+    AllowedPattern: '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}(,\s*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})*$'
+    ConstraintDescription: >
+      must be a comma delimited list of valid CIDR ranges of the form '1.2.3.4/32,5.6.7.8/32'.
+
+  MasterInstanceAMI:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      AMI ID of a master instance.
+      (Microsoft Windows Server 2016 Base)
+    ConstraintDescription: >
+      must be a valid AMI ID of Microsoft Windows Server 2016 Base.
+
+  MasterInstanceType:
+    Type: String
+    Default: t3.small
+    Description: >
+      EC2 instance type for a JMeter master.
+    ConstraintDescription: >
+      must be a valid EC2 instance type.
+
+  MasterInstanceJvmMemory:
+    Type: String
+    Default: 256M
+    AllowedValues:
+      - 256M
+      - 512M
+      - 1G
+      - 2G
+      - 4G
+    Description: >
+      JVM heap size for a JMeter master instance.
+
+  SlaveInstanceAMI:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      AMI ID of slave instances.
+      (Amazon Linux 2 AMI (HVM), SSD Volume Type)
+    ConstraintDescription: >
+      must be a valid AMI ID of Amazon Linux 2 AMI (HVM), SSD Volume Type.
+
+  SlaveInstanceType:
+    Type: String
+    Default: t3.micro
+    Description: >
+      EC2 instance type for JMeter slave instances.
+    ConstraintDescription: >
+      must be a valid EC2 instance type.
+
+  SlaveInstanceJvmMemory:
+    Type: String
+    Default: 256M
+    AllowedValues:
+      - 256M
+      - 512M
+      - 1G
+      - 2G
+      - 4G
+    Description: >
+      JVM heap size for JMeter slave instances.
+
+  SlaveCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: >
+      Number of EC2 instances to launch for the JMeter slave.
+
+  SlaveSpotPrice:
+    Type: Number
+    Default: 0
+    Description: >
+      Spot price for the JMeter slave.
+
+  NamePrefix:
+    Type: String
+    Default: fullbok
+    AllowedPattern: '[\w+=,.@-]+'
+    MinLength: 1
+    Description: >-
+      Adds prefix string to resource names.
+      (use hyphen instead of underscore)
+    ConstraintDescription: >
+      must be at least 1 or more characters in length.
+
+  CommonTags:
+    Type: String
+    AllowedPattern: '^([\w_.:/+\-@]+=[\w_.:/+\-@]*)?(,\s*[\w_.:/+\-@]+=[\w_.:/+\-@]*)*$'
+    Description: >-
+      Comma delimited list of tags to be added to every resources.
+      (in the form of 'Key=Value,Key2=Value2')
+    ConstraintDescription: >
+      must be a comma delimited list of valid Key-Value pairs in the form of Key=Value,Key2=Value2.
+
+Mappings:
+  JvmMemoryConfig:
+    256M:
+      HEAP: '-Xms256M -Xmx256M -XX:NewSize=64M  -XX:MaxNewSize=128M'
+    512M:
+      HEAP: '-Xms512M -Xmx512M -XX:NewSize=128M -XX:MaxNewSize=256M'
+    1G:
+      HEAP: '-Xms1G   -Xmx1G   -XX:NewSize=256M -XX:MaxNewSize=512M'
+    2G:
+      HEAP: '-Xms2G   -Xmx2G   -XX:NewSize=512M -XX:MaxNewSize=1G'
+    4G:
+      HEAP: '-Xms4G   -Xmx4G   -XX:NewSize=1G   -XX:MaxNewSize=2G'
+
+  StackConfig:
+    VPC:
+      CIDR: 10.0.0.0/16
+    PublicSubnet:
+      CIDR: 10.0.0.0/24
+    JMeter:
+      URL: http://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.0.tgz
+      Version: '5.0'
+    JREWin:
+      URL: http://download.oracle.com/otn-pub/java/jdk/8u192-b12/750e1c8617c5452694857ad95c3ee230/jre-8u192-windows-x64.exe
+      Version: jre1.8.0_192
+
+Conditions:
+  UseSpotInstance: !Not [!Equals [!Ref SlaveSpotPrice, 0]]
+
+Metadata:
+  ##############################################################################
+  ##  Parameters Interface Configurations
+  ##############################################################################
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Common Configuration
+        Parameters:
+          - KeyName
+          - AvailabilityZone
+          - SSHFrom
+
+      - Label:
+          default: Master Instance Configuration
+        Parameters:
+          - MasterInstanceAMI
+          - MasterInstanceType
+          - MasterInstanceJvmMemory
+
+      - Label:
+          default: Slave Instances Configuration
+        Parameters:
+          - SlaveInstanceAMI
+          - SlaveInstanceType
+          - SlaveInstanceJvmMemory
+          - SlaveCapacity
+          - SlaveSpotPrice
+
+      - Label:
+          default: Additional Configuration
+        Parameters:
+          - NamePrefix
+          - CommonTags
+
+Resources:
+##############################################################################
+##  IAM::Role
+##############################################################################
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${NamePrefix}-ec2-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+      Policies:
+        - PolicyName: !Sub ${NamePrefix}-ec2-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: 1
+                Effect: Allow
+                Action: autoscaling:Describe*
+                Resource: '*'
+              - Sid: 2
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - ec2:Get*
+                Resource: '*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${NamePrefix}-ec2-profile
+      Path: /
+      Roles:
+        - !Ref EC2InstanceRole
+
+##############################################################################
+##  VPC
+##############################################################################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [StackConfig, VPC, CIDR]
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_vpc
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+
+##########################################
+##  InternetGateway
+##########################################
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_ingw
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+##########################################
+##  Subnet
+##########################################
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Ref AvailabilityZone
+      CidrBlock: !FindInMap [StackConfig, PublicSubnet, CIDR]
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_pub_sn
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+
+##########################################
+##  RouteTable
+##########################################
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_pub_rt
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+##########################################
+##  VPCEndpoint
+##########################################
+  ## S3
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:*
+            Resource: '*'
+      RouteTableIds:
+        - !Ref PublicRouteTable
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId: !Ref VPC
+
+##########################################
+##  NetworkAcl
+##########################################
+  PublicACLAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      NetworkAclId: !Ref PublicNetworkACL
+
+  PublicNetworkACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_pub_acl
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+
+  ## Inbound access rules
+  PublicNetworkACLEntryIn0:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      Egress: false
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId: !Ref PublicNetworkACL
+      Protocol: -1
+      RuleNumber: 1
+
+  ## Outbound access rules
+  PublicNetworkACLEntryOut0:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId: !Ref PublicNetworkACL
+      Protocol: -1
+      RuleNumber: 1
+
+##########################################
+##  SecurityGroup
+##########################################
+  ## Slave
+  SlaveSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName:
+        Fn::Transform:
+          Name: SnakeCase
+          Parameters:
+            InputString: !Sub ${NamePrefix}_slave_sg
+      GroupDescription: SecurityGroup for Slave Instances
+      SecurityGroupIngress:
+        Fn::Transform:
+          Name: SpreadIngress
+          Parameters:
+            CidrIpList: !Ref SSHFrom
+            Description: Rule for SSH Access
+            IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_slave_sg
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+
+  SlaveSgIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SlaveSg
+      SourceSecurityGroupId: !Ref MasterSg
+      Description: Rule for Internal Access from Master Instance
+      IpProtocol: -1
+
+  SlaveSgIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      CidrIp: !FindInMap [StackConfig, PublicSubnet, CIDR]
+      GroupId: !Ref SlaveSg
+      Description: Rule for Internal Access
+      IpProtocol: -1
+
+  ## Master
+  MasterSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName:
+        Fn::Transform:
+          Name: SnakeCase
+          Parameters:
+            InputString: !Sub ${NamePrefix}_master_sg
+      GroupDescription: SecurityGroup for Master Instance
+      SecurityGroupIngress:
+        Fn::Transform:
+          Name: SpreadIngress
+          Parameters:
+            CidrIpList: !Ref SSHFrom
+            Description: Rule for RDP Access
+            IpProtocol: tcp
+            FromPort: 3389
+            ToPort: 3389
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_master_sg
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+
+  MasterSgIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSg
+      SourceSecurityGroupId: !Ref SlaveSg
+      Description: Rule for Internal Access from Slave Instances
+      IpProtocol: -1
+
+  MasterSgIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      CidrIp: !FindInMap [StackConfig, PublicSubnet, CIDR]
+      GroupId: !Ref MasterSg
+      Description: Rule for Internal Access
+      IpProtocol: -1
+
+##############################################################################
+##  Slave Instances
+##############################################################################
+  ## AutoScalingGroup
+  SlaveInstanceAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName:
+        Fn::Transform:
+          Name: SnakeCase
+          Parameters:
+            InputString: !Sub ${NamePrefix}_slave_autoscaling
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet
+      AvailabilityZones:
+        - !Ref AvailabilityZone
+      LaunchConfigurationName: !Ref SlaveInstanceLaunchConfig
+      MinSize: !Ref SlaveCapacity
+      MaxSize: !Ref SlaveCapacity
+      DesiredCapacity: !Ref SlaveCapacity
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 60
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+          PropagateAtLaunch: true
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_slave_server
+          PropagateAtLaunch: true
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+
+  ## LaunchConfiguration
+  SlaveInstanceLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          create_and_update:
+            - config-cfn_hup
+            - config-setup_unbound
+            - config-raise_ulimit
+            - config-install_jmeter
+            - config-modify_sysctl
+            - config-run_jmeter_server
+        config-cfn_hup:
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              mode: '000400'
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.SlaveInstanceLaunchConfig.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} -c create_and_update --resource SlaveInstanceLaunchConfig
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+        config-setup_unbound:
+          packages:
+            yum:
+              unbound: []
+          files:
+            "/etc/unbound/conf.d/internal.conf":
+              content: !Sub |
+                forward-zone:
+                  name: ${AWS::Region}.compute.internal
+                  forward-addr: 10.0.0.2
+          commands:
+            01-disable_peer_dns:
+              command: >-
+                sed -i
+                's/PEERDNS=yes/PEERDNS=no/g'
+                /etc/sysconfig/network-scripts/ifcfg-eth0
+            02-set_local_resolver:
+              command: >-
+                sed -i
+                's/nameserver .*/nameserver 127.0.0.1/g'
+                /etc/resolv.conf
+          services:
+            sysvinit:
+              network:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/sysconfig/network-scripts/ifcfg-eth0
+                  - /etc/resolv.conf
+              unbound:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/unbound/conf.d/internal.conf
+        config-raise_ulimit:
+          commands:
+            01-add_to_rc_local:
+              command: >-
+                echo -e
+                'ulimit -n 65536\nulimit -u 8192'
+                >> /etc/rc.d/rc.local
+              test: test ! -f .startup_complete-semaphore
+            02-set_executable:
+              command: >-
+                chmod +x /etc/rc.d/rc.local
+        config-install_jmeter:
+          packages:
+            yum:
+              java-1.8.0-openjdk: []
+          sources:
+            /opt: !FindInMap [StackConfig, JMeter, URL]
+          commands:
+            01-set_jmeter_home:
+              command: >-
+                echo
+                "export JMETER_HOME=$(cd /opt/apache-jmeter-* && pwd)"
+                > /etc/profile.d/env.jmeter_home.sh
+            02-set_java_home:
+              command: >-
+                echo
+                "export JAVA_HOME=$(dirname $(dirname $(readlink /etc/alternatives/java)))"
+                > /etc/profile.d/env.java_home.sh
+            03-create_hosts_entry-on_boot:
+              command: >-
+                echo
+                "$(curl --silent http://169.254.169.254/latest/meta-data/local-ipv4) $(hostname)"
+                >> /etc/hosts
+              test: test ! -f .startup_complete-semaphore
+            04-set_listen_address:
+              command: >-
+                echo
+                "export RMI_HOST_DEF=\"-Jserver.rmi.ssl.disable=true -Djava.rmi.server.hostname=$(curl
+                --silent http://169.254.169.254/latest/meta-data/local-hostname)\""
+                > /etc/profile.d/env.rmi_host_def.sh
+            05-set_heap:
+              command: !Sub
+                - >-
+                  echo
+                  "export HEAP=\"${HEAP}\""
+                  > /etc/profile.d/env.heap.sh
+                - HEAP: !FindInMap
+                    - JvmMemoryConfig
+                    - !Ref SlaveInstanceJvmMemory
+                    - HEAP
+            06-add_disabling_dns_caching:
+              command: >-
+                echo
+                "export JVM_ARGS=\"\${JVM_ARGS:-} -Dsun.net.inetaddr.ttl=0\""
+                > /etc/profile.d/env.dns_caching.sh
+        config-modify_sysctl:
+          commands:
+            01-tcp_param_tcp_tw_reuse:
+              command: echo "net.ipv4.tcp_tw_reuse = 1" >> /etc/sysctl.conf
+              test: test ! -f .startup_complete-semaphore
+            02-tcp_param_tcp_fin_timeout:
+              command: echo "net.ipv4.tcp_fin_timeout = 1" >> /etc/sysctl.conf
+              test: test ! -f .startup_complete-semaphore
+            03-apply_changes:
+              command: sysctl -p
+            04-signal_startup_complete:
+              command: touch .startup_complete-semaphore
+        config-run_jmeter_server:
+          files:
+            "/etc/rc.d/init.d/jmeter-server":
+              mode: '000755'
+              content: |
+                #!/bin/bash
+                #
+                # jmeter-server JMeter server
+                # chkconfig:    - 80 20
+                # description:  Runs JMeter server
+                # processname:  jmeter-server
+                # pidfile: /var/run/jmeter-server.pid
+                #
+
+                SYSTEMCTL_SKIP_REDIRECT=1
+
+                # source function library
+                . /etc/rc.d/init.d/functions
+
+                RETVAL=0
+
+                start () {
+                  if [ -z $(/sbin/pidof java) ]; then
+                    for f in /etc/profile.d/env.*.sh; do
+                      source ${f}
+                    done
+
+                    echo -n $"Starting jmeter-server: "
+                    daemon nohup "sh -c '${JMETER_HOME}/bin/jmeter-server 2>&1 | logger -p daemon.info &' < /dev/null > /dev/null 2>&1"
+                    RETVAL=$?
+                    echo
+                    if [ $RETVAL -eq 0 ]; then
+                      sleep 1
+                      touch /var/lock/subsys/jmeter-server
+                      /sbin/pidof java > /var/run/jmeter-server.pid
+                    fi
+                  else
+                    echo "jmeter-server is already running"
+                    RETVAL=1
+                  fi
+                }
+
+                stop () {
+                  echo -n $"Stopping jmeter-server: "
+                  killproc -p /var/run/jmeter-server.pid jmeter-server
+                  echo
+                  [ $RETVAL -eq 0 ] && rm -f /var/lock/subsys/jmeter-server
+                }
+
+                restart () {
+                  stop
+                  start
+                }
+
+                case "$1" in
+                  start)
+                    start
+                    ;;
+                  stop)
+                    stop
+                    ;;
+                  restart|force-reload|reload)
+                    restart
+                    ;;
+                  condrestart|try-restart)
+                    [ -f /var/lock/subsys/jmeter-server ] && restart
+                    ;;
+                  status)
+                    status -p /var/run/jmeter-server.pid jmeter-server
+                    RETVAL=$?
+                    ;;
+                  *)
+                    echo $"Usage: $0 {start|stop|status|restart|reload|force-reload|condrestart}"
+                    exit 1
+                esac
+
+                exit $RETVAL
+          services:
+            sysvinit:
+              jmeter-server:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      ImageId: !Ref SlaveInstanceAMI
+      InstanceType: !Ref SlaveInstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroups:
+        - !Ref SlaveSg
+      InstanceMonitoring: false
+      AssociatePublicIpAddress: true
+      KeyName: !Ref KeyName
+      SpotPrice: !If
+        - UseSpotInstance
+        - !Ref SlaveSpotPrice
+        - !Ref AWS::NoValue
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -x
+
+          yum update -y
+          yum install -y aws-cfn-bootstrap
+
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} -c create_and_update --resource SlaveInstanceLaunchConfig
+          /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource SlaveInstanceAutoScalingGroup
+
+##############################################################################
+##  Master Instance
+##############################################################################
+  MasterInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          create:
+            - config-cfn_hup
+            - config-place_scripts
+            - config-install_jdk
+            - config-disable_firewall
+            - config-install_jmeter
+            - config-setup_jmeter
+            - config-setup_jmeter_jvm
+          update:
+            - config-setup_jmeter
+        config-cfn_hup:
+          files:
+            'c:\cfn\cfn-hup.conf':
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            'c:\cfn\hooks.d\cfn-auto-reloader.conf':
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.MasterInstance.Metadata.AWS::CloudFormation::Init
+                action=cfn-init.exe -v --region ${AWS::Region} --stack ${AWS::StackName} -c update --resource MasterInstance
+
+                [cfn-auto-reloader-hook-slave]
+                triggers=post.update
+                path=Resources.SlaveInstanceLaunchConfig.Metadata.AWS::CloudFormation::Init
+                action=cfn-init.exe -v --region ${AWS::Region} --stack ${AWS::StackName} -c update --resource MasterInstance
+          services:
+            windows:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - 'c:\cfn\cfn-hup.conf'
+                  - 'c:\cfn\hooks.d\cfn-auto-reloader.conf'
+        config-place_scripts:
+          files:
+            'c:\install_jdk.ps1':
+              content: !Sub
+                - |
+                  $client = new-object System.Net.WebClient
+                  $client.Headers.add("Cookie", "oraclelicense=accept-securebackup-cookie")
+                  $client.DownloadFile("${JREWin}", "C:\Users\Administrator\jre.exe")
+
+                  C:\Users\Administrator\jre.exe /s /lang=1041 INSTALLDIR=C:\java\${JREVer}
+
+                  $env:PATH = $env:PATH + ";C:\java\${JREVer}\bin"
+                - JREWin: !FindInMap [StackConfig, JREWin, URL]
+                  JREVer: !FindInMap [StackConfig, JREWin, Version]
+            'c:\create_shortcut.ps1':
+              content: !Sub
+                - |
+                  $WshShell = New-Object -comObject WScript.Shell
+
+                  $shortcut = $WshShell.CreateShortcut("C:\Users\Administrator\Desktop\JMeter.lnk")
+                  $shortcut.TargetPath = "C:\jmeter\apache-jmeter-${JMeterVer}\bin\jmeterw.cmd"
+                  $shortcut.WorkingDirectory = "C:\jmeter\apache-jmeter-${JMeterVer}\bin"
+
+                  $shortcut.Save()
+                - JMeterVer: !FindInMap [StackConfig, JMeter, Version]
+            'c:\setup_jmeter_cluster.ps1':
+              content: !Sub
+                - |
+                  Set-DefaultAWSRegion ${AWS::Region}
+
+                  $slaves = (Get-ASAutoScalingInstance |
+                    ? {$_.AutoScalingGroupName -eq "${SlaveInstanceAutoScalingGroup}"} |
+                    select -ExpandProperty InstanceId |
+                    Get-EC2Instance |
+                    select -ExpandProperty RunningInstance |
+                    select -ExpandProperty PrivateIpAddress) -join ','
+
+                  (Get-Content "C:\jmeter\apache-jmeter-${JMeterVer}\bin\jmeter.properties") |
+                    Foreach-Object {$_ -replace '^remote_hosts=.*$', ("remote_hosts=" + $slaves)} |
+                    Foreach-Object {$_ -replace '^#server.rmi.ssl.disable=.*$', ("server.rmi.ssl.disable=true")} |
+                    Set-Content "C:\jmeter\apache-jmeter-${JMeterVer}\bin\jmeter.properties"
+                - JMeterVer: !FindInMap [StackConfig, JMeter, Version]
+                  SlaveInstanceAutoScalingGroup: !Ref SlaveInstanceAutoScalingGroup
+            'c:\update_jmeter.ps1':
+              content: !Sub
+                - |
+                  (Get-Content "C:\jmeter\apache-jmeter-${JMeterVer}\bin\jmeter.bat") |
+                    Foreach-Object {$_ -replace '^set HEAP=.*$', ("set HEAP=${HEAP}")} |
+                    Set-Content "C:\jmeter\apache-jmeter-${JMeterVer}\bin\jmeter.bat"
+                - JMeterVer: !FindInMap [StackConfig, JMeter, Version]
+                  HEAP: !FindInMap
+                    - JvmMemoryConfig
+                    - !Ref MasterInstanceJvmMemory
+                    - HEAP
+        config-install_jdk:
+          commands:
+            01-install_jdk:
+              command: >-
+                powershell.exe -ExecutionPolicy Bypass -NoLogo -NonInteractive
+                -NoProfile -WindowStyle Hidden -File c:\install_jdk.ps1
+        config-disable_firewall:
+          commands:
+            01-disable_firewall:
+              command: netsh advfirewall set allprofiles state off
+        config-install_jmeter:
+          sources:
+            'c:\jmeter': !FindInMap
+              - StackConfig
+              - JMeter
+              - URL
+          commands:
+            01-create_shortcut:
+              command: >-
+                powershell.exe -ExecutionPolicy Bypass -NoLogo -NonInteractive
+                -NoProfile -WindowStyle Hidden -File c:\create_shortcut.ps1
+        config-setup_jmeter:
+          commands:
+            01-setup_jmeter_cluster:
+              command: >-
+                powershell.exe -ExecutionPolicy Bypass -NoLogo -NonInteractive
+                -NoProfile -WindowStyle Hidden -File c:\setup_jmeter_cluster.ps1
+        config-setup_jmeter_jvm:
+          commands:
+            01-setup_jmeter_jvm_param:
+              command: >-
+                powershell.exe -ExecutionPolicy Bypass -NoLogo -NonInteractive
+                -NoProfile -WindowStyle Hidden -File c:\update_jmeter.ps1
+    Properties:
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      ImageId: !Ref MasterInstanceAMI
+      InstanceInitiatedShutdownBehavior: stop
+      InstanceType: !Ref MasterInstanceType
+      KeyName: !Ref KeyName
+      Monitoring: false
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref MasterSg
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value:
+            Fn::Transform:
+              Name: SnakeCase
+              Parameters:
+                InputString: !Sub ${NamePrefix}_master_server
+      Fn::Transform:
+        Name: AppendTags
+        Parameters:
+          Tags: !Ref CommonTags
+      UserData:
+        'Fn::Base64': !Sub |
+          <powershell>
+            cfn-init.exe -v --region ${AWS::Region} --stack ${AWS::StackId} -c create --resource MasterInstance
+            cfn-signal.exe -e $lastexitcode --region ${AWS::Region} --stack ${AWS::StackName} --resource MasterInstance
+          </powershell>
+
+##############################################################################
+##  Outputs
+##############################################################################
+Outputs:
+  SSHToSlaveInstances:
+    Value: !Sub 'ssh -i /path/to/${KeyName}.pem ec2-user@<ip/hostname>'
+    Description: >
+      SSH command to connect to the JMeter slave instances.
+
+  RDPToMasterInstance:
+    Value: !Sub
+      - 'remotedesktop://${MasterDnsName}'
+      - MasterDnsName: !GetAtt
+          - MasterInstance
+          - PublicDnsName
+    Description: >
+      RDP connection to the JMeter master instance.
