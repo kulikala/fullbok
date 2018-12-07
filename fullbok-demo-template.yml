@@ -1,0 +1,446 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: >
+  fullbok-demo - JMeter cluster demo CloudFormation template file.
+
+##############################################################################
+##  CloudFormation Parameters
+##############################################################################
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: >
+      The Name of an existing EC2 KeyPair to enable SSH access to the instances.
+    ConstraintDescription: >
+      must be the name of an existing EC2 KeyPair.
+
+  TargetCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    Description: >
+      Number of EC2 instances to launch for the JMeter Target.
+
+  NamePrefix:
+    Type: String
+    Default: fullbok-demo
+    AllowedPattern: '[\w+=,.@-]+'
+    MinLength: 1
+    Description: >-
+      Adds prefix string to resource names.
+      (use hyphen instead of underscore)
+    ConstraintDescription: >
+      must be at least 1 or more characters in length.
+
+Mappings:
+  AWSAmazonLinuxAMI:
+    # Amazon Linux 2 AMI 2.0.20181114 x86_64 HVM gp2
+    ap-northeast-1:
+      ami: "ami-0a2de1c3b415889d2"
+    ap-northeast-2:
+      ami: "ami-0b4fdb56a00adb616"
+    ap-south-1:
+      ami: "ami-06bcd1131b2f55803"
+    ap-southeast-1:
+      ami: "ami-0b84d2c53ad5250c2"
+    ap-southeast-2:
+      ami: "ami-08589eca6dcc9b39c"
+    ca-central-1:
+      ami: "ami-076b4adb3f90cd384"
+    eu-central-1:
+      ami: "ami-034fffcc6a0063961"
+    eu-west-1:
+      ami: "ami-09693313102a30b2c"
+    eu-west-2:
+      ami: "ami-0274e11dced17bb5b"
+    eu-west-3:
+      ami: "ami-051707cdba246187b"
+    sa-east-1:
+      ami: "ami-0112d42866980b373"
+    us-east-1:
+      ami: "ami-009d6802948d06e52"
+    us-east-2:
+      ami: "ami-02e680c4540db351e"
+    us-west-1:
+      ami: "ami-011b6930a81cd6aaf"
+    us-west-2:
+      ami: "ami-01bbe152bf19d0289"
+
+  StackConfig:
+    VPC:
+      CIDR: 10.0.0.0/16
+    PublicSubnet1:
+      CIDR: 10.0.1.0/24
+    PublicSubnet2:
+      CIDR: 10.0.2.0/24
+    TargetInstance:
+      InstanceType: t3.micro
+
+Resources:
+##############################################################################
+##  IAM::Role
+##############################################################################
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${NamePrefix}-ec2-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${NamePrefix}-ec2-profile
+      Path: /
+      Roles:
+        - !Ref EC2InstanceRole
+
+##############################################################################
+##  VPC
+##############################################################################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [StackConfig, VPC, CIDR]
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ${NamePrefix}-vpc
+
+##########################################
+##  InternetGateway
+##########################################
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ${NamePrefix}-ingw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+##########################################
+##  Subnet
+##########################################
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      CidrBlock: !FindInMap [StackConfig, PublicSubnet1, CIDR]
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ${NamePrefix}-pub-sn-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      CidrBlock: !FindInMap [StackConfig, PublicSubnet2, CIDR]
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ${NamePrefix}-pub-sn-2
+
+##########################################
+##  RouteTable
+##########################################
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ${NamePrefix}-pub-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+##########################################
+##  SecurityGroup
+##########################################
+  PublicAlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${NamePrefix}-public-alb-sg
+      GroupDescription: SecurityGroup for Public ALB
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Enable HTTP access via port 80
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ${NamePrefix}-public-alb-sg
+
+  TargetFleetSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${NamePrefix}-target-fleet-sg
+      GroupDescription: SecurityGroup for Public ALB
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Enable SSH access via port 22
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+        - Key: Name
+          Value: !Sub ${NamePrefix}-target-fleet-sg
+
+  TargetFleetSgIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      SourceSecurityGroupId: !Ref PublicAlbSg
+      Description: Rule For HTTP Access From Public ALB
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      GroupId: !Ref TargetFleetSg
+
+##############################################################################
+##  Elastic Load Balancer
+##############################################################################
+  PublicAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${NamePrefix}-pub-alb
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref PublicAlbSg
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+
+##########################################
+##  Listener
+##########################################
+  PublicAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PublicAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetFleetTg
+
+##########################################
+##  Target Group
+##########################################
+  TargetFleetTg:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: PublicAlb
+    Properties:
+      Name: !Sub ${NamePrefix}-fleet-tg
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      Matcher:
+        HttpCode: 200-299
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /index.html
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: instance
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+        - Key: stickiness.enabled
+          Value: false
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+
+##############################################################################
+##  Target Fleet
+##############################################################################
+  ## AutoScalingGroup
+  TargetFleetAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${NamePrefix}-target-autoscaling
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      AvailabilityZones:
+        - !Select [ 0, !GetAZs ]
+        - !Select [ 1, !GetAZs ]
+      LaunchConfigurationName: !Ref TargetFleetLaunchConfig
+      MinSize: !Ref TargetCapacity
+      MaxSize: !Ref TargetCapacity
+      DesiredCapacity: !Ref TargetCapacity
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 60
+      TargetGroupARNs:
+        - !Ref TargetFleetTg
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackId
+          PropagateAtLaunch: true
+        - Key: Name
+          Value: !Sub ${NamePrefix}-target-server
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+
+  ## LaunchConfiguration
+  TargetFleetLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          create_and_update:
+            - config-cfn_hup
+            - config-setup_httpd
+        config-cfn_hup:
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              mode: '000400'
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.TargetFleetLaunchConfig.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} -c create_and_update --resource TargetFleetLaunchConfig
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+        config-setup_httpd:
+          packages:
+            yum:
+              httpd: []
+              php: []
+          files:
+            /var/www/html/index.html:
+              content: >-
+                <html>
+                <head>
+                <title>Hello</title>
+                </head>
+                <body>
+                Hello, target!
+                </body>
+                </html>
+              mode: '000644'
+              owner: apache
+              group: apache
+            /var/www/html/info.php:
+              content: <?php phpinfo();
+              mode: '000644'
+              owner: apache
+              group: apache
+            /var/www/html/wait.php:
+              content: >-
+                <?php
+                usleep($_GET['time']);
+                echo "wait complete." . $_GET['time'];
+              mode: '000644'
+              owner: apache
+              group: apache
+          services:
+            sysvinit:
+              httpd:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      ImageId: !FindInMap
+        - AWSAmazonLinuxAMI
+        - !Ref AWS::Region
+        - ami
+      InstanceType: !FindInMap
+        - StackConfig
+        - TargetInstance
+        - InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroups:
+        - !Ref TargetFleetSg
+      InstanceMonitoring: false
+      AssociatePublicIpAddress: true
+      KeyName: !Ref KeyName
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -x
+
+          yum update -y
+          yum install -y aws-cfn-bootstrap
+
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} -c create_and_update --resource TargetFleetLaunchConfig
+          /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource TargetFleetAutoScalingGroup
+
+##############################################################################
+##  Outputs
+##############################################################################
+Outputs:
+  Endpoint:
+    Value: !Sub
+      - 'http://${DNS}'
+      - DNS: !GetAtt PublicAlb.DNSName
+    Description: >
+      URL of the target website
