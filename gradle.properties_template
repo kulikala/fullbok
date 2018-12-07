@@ -1,6 +1,0 @@
-profileName=<for demo or deploy>
-region=<for demo or deploy>
-keyName=<for demo>
-targetCapacity=2
-slaveCapacity=2
-masterInstanceAMI=ami-xxxxxxxx
