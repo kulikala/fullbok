@@ -1,0 +1,238 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: >
+  fullbok-macro - Macro definitions for JMeter cluster.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: fullbok
+    AllowedPattern: '[\w+=,.@-]+'
+    MinLength: 1
+    Description: >-
+      Adds prefix string to resource names.
+      (use hyphen instead of underscore)
+    ConstraintDescription: >
+      must be at least 1 or more characters in length.
+
+Resources:
+##############################################################################
+##  Role
+##############################################################################
+  TransformExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${NamePrefix}-transform-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: !Sub ${NamePrefix}-transform-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:*'
+                Resource: 'arn:aws:logs:*:*:*'
+
+##############################################################################
+##  AppendTags
+##############################################################################
+  AppendTagsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${NamePrefix}-transform-appendtags
+      Code:
+        ZipFile: |
+          import traceback
+          import json
+
+          def handler(event, context):
+            print(json.dumps(event))
+
+            response = {
+              'requestId': event['requestId'],
+              'status': 'success'
+            }
+
+            try:
+              fragment = event['fragment']
+              append_tags = event['params']['Tags']
+
+              if type(append_tags) is str:
+                append_tags = append_tags.split(',')
+
+              if 'PropagateAtLaunch' in event['params']:
+                add_propagate = True
+              else:
+                add_propagate = False
+
+              if 'Tags' in fragment:
+                tags = fragment['Tags']
+              else:
+                tags = []
+
+              for tag in append_tags:
+                if '=' in tag:
+                  key, value = tag.split('=')
+
+                  if add_propagate:
+                    tags.append({
+                      'Key': key.strip(),
+                      'Value': value.strip(),
+                      'PropagateAtLaunch': event['params']['PropagateAtLaunch']
+                    })
+                  else:
+                    tags.append({
+                      'Key': key.strip(),
+                      'Value': value.strip()
+                    })
+
+              fragment['Tags'] = tags
+              response['fragment'] = fragment
+
+            except Exception as e:
+              traceback.print_exc()
+              response['status'] = 'failure'
+              response['errorMessage'] = str(e)
+
+            return response
+      Handler: index.handler
+      Runtime: python3.6
+      Role: !GetAtt TransformExecutionRole.Arn
+
+  AppendTagsFunctionPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt AppendTagsFunction.Arn
+      Principal: cloudformation.amazonaws.com
+
+  AppendTagsMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: AppendTags
+      Description: Append tags in templates
+      FunctionName: !GetAtt AppendTagsFunction.Arn
+
+##############################################################################
+##  SnakeCase
+##############################################################################
+  SnakeCaseFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${NamePrefix}-transform-snakecase
+      Code:
+        ZipFile: |
+          import traceback
+          import json
+
+          def handler(event, context):
+            print(json.dumps(event))
+
+            response = {
+              'requestId': event['requestId'],
+              'status': 'success'
+            }
+
+            try:
+              input = event['params']['InputString']
+
+              response['fragment'] = input.replace('-', '_')
+
+            except Exception as e:
+              traceback.print_exc()
+              response['status'] = 'failure'
+              response['errorMessage'] = str(e)
+
+            return response
+      Handler: index.handler
+      Runtime: python3.6
+      Role: !GetAtt TransformExecutionRole.Arn
+
+  SnakeCaseFunctionPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt SnakeCaseFunction.Arn
+      Principal: cloudformation.amazonaws.com
+
+  SnakeCaseMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: SnakeCase
+      Description: Replace hyphens with underscores in templates
+      FunctionName: !GetAtt SnakeCaseFunction.Arn
+
+##############################################################################
+##  SpreadIngress
+##############################################################################
+  SpreadIngressFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${NamePrefix}-transform-spreadingress
+      Code:
+        ZipFile: |
+          import traceback
+          import json
+
+          def handler(event, context):
+            print(json.dumps(event))
+
+            response = {
+              'requestId': event['requestId'],
+              'status': 'success'
+            }
+
+            try:
+              params = event['params']
+              cidr_list = params['CidrIpList']
+
+              del params['CidrIpList']
+
+              if type(cidr_list) is str:
+                cidr_list = cidr_list.split(',')
+
+              fragment = []
+
+              for cidr in cidr_list:
+                if len(cidr) > 0:
+                  ingress_item = {
+                    'CidrIp': cidr.strip()
+                  }
+                  ingress_item.update(params)
+
+                  fragment.append(ingress_item)
+
+              response['fragment'] = fragment
+
+            except Exception as e:
+              traceback.print_exc()
+              response['status'] = 'failure'
+              response['errorMessage'] = str(e)
+
+            return response
+      Handler: index.handler
+      Runtime: python3.6
+      Role: !GetAtt TransformExecutionRole.Arn
+
+  SpreadIngressFunctionPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt SpreadIngressFunction.Arn
+      Principal: cloudformation.amazonaws.com
+
+  SpreadIngressMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: SpreadIngress
+      Description: Spread SecurityGroupIngress in templates
+      FunctionName: !GetAtt SpreadIngressFunction.Arn
