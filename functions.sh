@@ -13,7 +13,8 @@ check_stack_exists () {
   echo "Checking if stack exists: ${STACK}"
   echo
 
-  local OUT=$(aws cloudformation describe-stacks \
+  local OUT
+  OUT=$(aws cloudformation describe-stacks \
     --stack-name ${STACK} \
     --query 'Stacks[0].StackStatus' \
     --output text \
@@ -44,7 +45,8 @@ check_up_to_date_change_set () {
   echo "  of stack: ${STACK}"
   echo
 
-  local OUT=$(aws cloudformation describe-change-set \
+  local OUT
+  OUT=$(aws cloudformation describe-change-set \
     --change-set-name ${CHANGE_SET} \
     --stack-name ${STACK} \
     --query 'StatusReason' \
