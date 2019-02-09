@@ -172,7 +172,8 @@ update_macro () {
   echo "Updating stack: ${STACK_NAME_MACRO}"
   echo
 
-  local OUT=$(aws cloudformation update-stack \
+  local OUT
+  OUT=$(aws cloudformation update-stack \
     --stack-name ${STACK_NAME_MACRO} \
     --template-url ${TEMPLATE_LOCATION}/fullbok-macro.yml \
     --parameters \
