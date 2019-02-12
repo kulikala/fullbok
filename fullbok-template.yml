@@ -893,6 +893,10 @@ Resources:
           commands:
             01-disable_firewall:
               command: netsh advfirewall set allprofiles state off
+            02-switch_network_category_private:
+              command: >-
+                powershell.exe -ExecutionPolicy Bypass -NoLogo -NonInteractive
+                -NoProfile -WindowStyle Hidden -Command "Set-NetConnectionProfile -NetworkCategory Private"
         config-install_jmeter:
           sources:
             'c:\jmeter': !FindInMap
